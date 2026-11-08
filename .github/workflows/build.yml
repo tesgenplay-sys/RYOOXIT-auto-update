@@ -1,11 +1,18 @@
 name: Build RyooXIT
 
 # Cara pakai (cukup dari HP):
-#  - Tes build : tab Actions > Build RyooXIT > Run workflow  (APK ada di bagian Artifacts)
+#  - Tes build : tab Actions > Build RyooXIT > Run workflow, isi kolom versi (contoh 1.0.4).
+#                APK uji coba ada di bagian Artifacts. TIDAK mengubah version.json (tidak publik).
 #  - Rilis     : Releases > Create new release, tag v1.0.4 > Publish release
 #                -> APK dibuild, dilampirkan ke release, version.json diperbarui otomatis.
+#                Kalau dipilih label Pre-release: APK dilampirkan, tapi version.json TIDAK diubah.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versi uji coba, contoh 1.0.4 (kosongkan = versi bawaan)'
+        required: false
+        default: ''
   release:
     types: [published]
 
@@ -35,21 +42,31 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          NAME=""; SUFFIX=""
           if [ "$EVENT" = "release" ]; then
             if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
               echo "Tag harus berbentuk v1.0.4 (angka.angka.angka). Sekarang: $TAG"; exit 1
             fi
             NAME="${TAG#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            if ! echo "$INPUT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Versi harus berbentuk 1.0.4 (angka.angka.angka). Sekarang: $INPUT_VERSION"; exit 1
+            fi
+            NAME="$INPUT_VERSION"; SUFFIX="-test"
+          fi
+          if [ -n "$NAME" ]; then
             IFS=. read -r MA MI PA <<< "$NAME"
             CODE=$((MA*10000 + MI*100 + PA))
             echo "VER_ARGS=-PappVersionName=$NAME -PappVersionCode=$CODE" >> "$GITHUB_ENV"
             echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
           else
-            NAME="manual"
+            NAME="manual"; SUFFIX="-test"
             echo "VER_ARGS=" >> "$GITHUB_ENV"
           fi
           echo "APP_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "APK_FILE=RyooXIT-$NAME$SUFFIX.apk" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -87,11 +104,11 @@ jobs:
           if [ ! -f "$SRC" ]; then
             echo "APK bertanda tangan tidak ada. File yang ada:"; ls "$PROJECT_DIR/app/build/outputs/apk/release/" || true; exit 1
           fi
-          cp "$SRC" "RyooXIT-$APP_NAME.apk"
+          cp "$SRC" "$APK_FILE"
           # Pastikan tanda tangan sama dengan EXPECTED_SHA256 di MainActivity (kalau beda, app menolak jalan)
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1 || true)
           if [ -n "$APKSIGNER" ]; then
-            GOT=$("$APKSIGNER" verify --print-certs "RyooXIT-$APP_NAME.apk" | grep -m1 'SHA-256 digest' | sed 's/.*: *//' | tr -d ':' | tr 'A-F' 'a-f')
+            GOT=$("$APKSIGNER" verify --print-certs "$APK_FILE" | grep -m1 'SHA-256 digest' | sed 's/.*: *//' | tr -d ':' | tr 'A-F' 'a-f')
             EXP=$(grep -oE '"([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}"' "$PROJECT_DIR/app/src/main/java/com/ryooxit/app/MainActivity.kt" | head -n1 | tr -d '":' | tr 'A-F' 'a-f')
             echo "Tanda tangan APK : $GOT"
             echo "Diharapkan app   : $EXP"
@@ -110,17 +127,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "RyooXIT-$APP_NAME.apk" --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" "$APK_FILE" --clobber --repo "$GITHUB_REPOSITORY"
 
-      - name: Perbarui version.json
-        if: github.event_name == 'release'
+      - name: Perbarui version.json (hanya rilis publik, bukan pre-release)
+        if: github.event_name == 'release' && github.event.release.prerelease == false
         env:
           TAG: ${{ github.event.release.tag_name }}
           BODY: ${{ github.event.release.body }}
           DEFBRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          SHA=$(sha256sum "RyooXIT-$APP_NAME.apk" | cut -d' ' -f1)
-          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/RyooXIT-$APP_NAME.apk"
+          SHA=$(sha256sum "$APK_FILE" | cut -d' ' -f1)
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$APK_FILE"
           LOG=$(printf '%s' "$BODY" | head -c 500)
           jq -n --argjson code "$APP_CODE" --arg name "$APP_NAME" --arg url "$URL" \
                 --arg sha "$SHA" --arg log "$LOG" \
