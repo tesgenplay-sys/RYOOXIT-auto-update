@@ -1,0 +1,135 @@
+name: Build RyooXIT
+
+# Cara pakai (cukup dari HP):
+#  - Tes build : tab Actions > Build RyooXIT > Run workflow  (APK ada di bagian Artifacts)
+#  - Rilis     : Releases > Create new release, tag v1.0.4 > Publish release
+#                -> APK dibuild, dilampirkan ke release, version.json diperbarui otomatis.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Siapkan sumber project
+        run: |
+          # Kalau project diunggah sebagai .zip di root repo, ekstrak dulu.
+          if [ ! -f settings.gradle.kts ]; then
+            Z=$(ls ./*.zip 2>/dev/null | head -n1 || true)
+            if [ -n "$Z" ]; then unzip -q "$Z" -d _src; fi
+          fi
+          F=$(find . -name settings.gradle.kts -not -path './.git/*' | head -n1)
+          if [ -z "$F" ]; then echo "settings.gradle.kts tidak ditemukan. Unggah project (atau zip-nya) ke root repo."; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$F")" >> "$GITHUB_ENV"
+
+      - name: Tentukan versi
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$EVENT" = "release" ]; then
+            if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Tag harus berbentuk v1.0.4 (angka.angka.angka). Sekarang: $TAG"; exit 1
+            fi
+            NAME="${TAG#v}"
+            IFS=. read -r MA MI PA <<< "$NAME"
+            CODE=$((MA*10000 + MI*100 + PA))
+            echo "VER_ARGS=-PappVersionName=$NAME -PappVersionCode=$CODE" >> "$GITHUB_ENV"
+            echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
+          else
+            NAME="manual"
+            echo "VER_ARGS=" >> "$GITHUB_ENV"
+          fi
+          echo "APP_NAME=$NAME" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Siapkan keystore
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then echo "Secret KEYSTORE_BASE64 belum diisi."; exit 1; fi
+          echo "$KEYSTORE_BASE64" | base64 -d > ryooxit.jks
+
+      - name: Build APK release
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          RYOOXIT_STORE_FILE: ryooxit.jks
+          RYOOXIT_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          RYOOXIT_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          RYOOXIT_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace $VER_ARGS
+
+      - name: Hapus keystore dari runner
+        if: always()
+        run: rm -f "$PROJECT_DIR/ryooxit.jks"
+
+      - name: Ambil APK dan cek tanda tangan
+        run: |
+          SRC="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$SRC" ]; then
+            echo "APK bertanda tangan tidak ada. File yang ada:"; ls "$PROJECT_DIR/app/build/outputs/apk/release/" || true; exit 1
+          fi
+          cp "$SRC" "RyooXIT-$APP_NAME.apk"
+          # Pastikan tanda tangan sama dengan EXPECTED_SHA256 di MainActivity (kalau beda, app menolak jalan)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$APKSIGNER" ]; then
+            GOT=$("$APKSIGNER" verify --print-certs "RyooXIT-$APP_NAME.apk" | grep -m1 'SHA-256 digest' | sed 's/.*: *//' | tr -d ':' | tr 'A-F' 'a-f')
+            EXP=$(grep -oE '"([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}"' "$PROJECT_DIR/app/src/main/java/com/ryooxit/app/MainActivity.kt" | head -n1 | tr -d '":' | tr 'A-F' 'a-f')
+            echo "Tanda tangan APK : $GOT"
+            echo "Diharapkan app   : $EXP"
+            if [ "$GOT" != "$EXP" ]; then
+              echo "TANDA TANGAN BERBEDA. Keystore di Secrets bukan yang dipakai EXPECTED_SHA256. Dibatalkan."; exit 1
+            fi
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RyooXIT-apk
+          path: RyooXIT-*.apk
+
+      - name: Lampirkan APK ke Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "RyooXIT-$APP_NAME.apk" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Perbarui version.json
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          BODY: ${{ github.event.release.body }}
+          DEFBRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          SHA=$(sha256sum "RyooXIT-$APP_NAME.apk" | cut -d' ' -f1)
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/RyooXIT-$APP_NAME.apk"
+          LOG=$(printf '%s' "$BODY" | head -c 500)
+          jq -n --argjson code "$APP_CODE" --arg name "$APP_NAME" --arg url "$URL" \
+                --arg sha "$SHA" --arg log "$LOG" \
+            '{versionCode:$code, versionName:$name, apkUrl:$url, sha256:$sha, changelog:$log, forceUpdate:false}' > /tmp/version.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$DEFBRANCH"
+          git checkout -B "$DEFBRANCH" "origin/$DEFBRANCH"
+          cp /tmp/version.json version.json
+          git add version.json
+          git diff --cached --quiet || git commit -m "version.json -> $APP_NAME"
+          git push origin "HEAD:$DEFBRANCH"
