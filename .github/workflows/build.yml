@@ -57,8 +57,10 @@ jobs:
             NAME="$INPUT_VERSION"; SUFFIX="-test"
           fi
           if [ -n "$NAME" ]; then
-            IFS=. read -r MA MI PA <<< "$NAME"
-            CODE=$((MA*10000 + MI*100 + PA))
+            # versionName tetap mengikuti input/tag (contoh 1.0.5).
+            # versionCode dibuat selalu lebih tinggi dari skema lama (1.0.5 = 10005)
+            # dan naik pada setiap workflow run agar APK test bisa dipasang sebagai update.
+            CODE=$((200000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
             echo "VER_ARGS=-PappVersionName=$NAME -PappVersionCode=$CODE" >> "$GITHUB_ENV"
             echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
           else
