@@ -1,17 +1,19 @@
 name: Build RyooXIT
 
 # Cara pakai (cukup dari HP):
-#  - Tes build : tab Actions > Build RyooXIT > Run workflow, isi kolom versi (contoh 1.0.4).
+#  - Tes build : tab Actions > Build RyooXIT > Run workflow, isi kolom versi (WAJIB, contoh 1.0.5).
 #                APK uji coba ada di bagian Artifacts. TIDAK mengubah version.json (tidak publik).
 #  - Rilis     : Releases > Create new release, tag v1.0.4 > Publish release
 #                -> APK dibuild, dilampirkan ke release, version.json diperbarui otomatis.
 #                Kalau dipilih label Pre-release: APK dilampirkan, tapi version.json TIDAK diubah.
+#                CATATAN: mengubah pre-release jadi release penuh TIDAK menjalankan workflow ini lagi;
+#                untuk rilis publik buat release baru (tag baru / hapus release pre-release lama).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versi uji coba, contoh 1.0.4 (kosongkan = versi bawaan)'
-        required: false
+        description: 'Versi uji coba, contoh 1.0.5'
+        required: true
         default: ''
   release:
     types: [published]
@@ -19,9 +21,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ryooxit-build-${{ github.event_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +38,10 @@ jobs:
         run: |
           # Kalau project diunggah sebagai .zip di root repo, ekstrak dulu.
           if [ ! -f settings.gradle.kts ]; then
+            N=$(ls ./*.zip 2>/dev/null | wc -l || true)
+            if [ "$N" -gt 1 ]; then
+              echo "Ada $N file .zip di root repo. Sisakan satu saja (hapus yang lama):"; ls ./*.zip; exit 1
+            fi
             Z=$(ls ./*.zip 2>/dev/null | head -n1 || true)
             if [ -n "$Z" ]; then unzip -q "$Z" -d _src; fi
           fi
@@ -57,15 +68,12 @@ jobs:
             NAME="$INPUT_VERSION"; SUFFIX="-test"
           fi
           if [ -n "$NAME" ]; then
-            # versionName tetap mengikuti input/tag (contoh 1.0.5).
-            # versionCode dibuat selalu lebih tinggi dari skema lama (1.0.5 = 10005)
-            # dan naik pada setiap workflow run agar APK test bisa dipasang sebagai update.
-            CODE=$((200000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+            IFS=. read -r MA MI PA <<< "$NAME"
+            CODE=$((MA*10000 + MI*100 + PA))
             echo "VER_ARGS=-PappVersionName=$NAME -PappVersionCode=$CODE" >> "$GITHUB_ENV"
             echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
           else
-            NAME="manual"; SUFFIX="-test"
-            echo "VER_ARGS=" >> "$GITHUB_ENV"
+            echo "Versi wajib diisi (contoh 1.0.5)."; exit 1
           fi
           echo "APP_NAME=$NAME" >> "$GITHUB_ENV"
           echo "APK_FILE=RyooXIT-$NAME$SUFFIX.apk" >> "$GITHUB_ENV"
@@ -109,12 +117,13 @@ jobs:
           cp "$SRC" "$APK_FILE"
           # Pastikan tanda tangan sama dengan EXPECTED_SHA256 di MainActivity (kalau beda, app menolak jalan)
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$APKSIGNER" ]; then echo "apksigner tidak ditemukan, tanda tangan tidak bisa diverifikasi. Dibatalkan."; exit 1; fi
           if [ -n "$APKSIGNER" ]; then
             GOT=$("$APKSIGNER" verify --print-certs "$APK_FILE" | grep -m1 'SHA-256 digest' | sed 's/.*: *//' | tr -d ':' | tr 'A-F' 'a-f')
             EXP=$(grep -oE '"([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}"' "$PROJECT_DIR/app/src/main/java/com/ryooxit/app/MainActivity.kt" | head -n1 | tr -d '":' | tr 'A-F' 'a-f')
             echo "Tanda tangan APK : $GOT"
             echo "Diharapkan app   : $EXP"
-            if [ "$GOT" != "$EXP" ]; then
+            if [ -z "$GOT" ] || [ -z "$EXP" ] || [ "$GOT" != "$EXP" ]; then
               echo "TANDA TANGAN BERBEDA. Keystore di Secrets bukan yang dipakai EXPECTED_SHA256. Dibatalkan."; exit 1
             fi
           fi
@@ -123,6 +132,8 @@ jobs:
         with:
           name: RyooXIT-apk
           path: RyooXIT-*.apk
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Lampirkan APK ke Release
         if: github.event_name == 'release'
