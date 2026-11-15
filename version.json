@@ -1,8 +1,8 @@
 {
-  "versionCode": 10005,
-  "versionName": "1.0.5",
-  "apkUrl": "https://github.com/tesgenplay-sys/RYOOXIT-auto-update/releases/download/v1.0.5/RyooXIT-1.0.5.apk",
-  "sha256": "d32072690936b3690d673eca716ceda42051ca006fef56c3d1a7d1012105917c",
-  "changelog": "menambahkan fitur baru file manager fix eror dimz khusus hp yang sup dimz add profile bisa ganti poto sesuka hati",
+  "versionCode": 10006,
+  "versionName": "1.0.6",
+  "apkUrl": "https://github.com/tesgenplay-sys/RYOOXIT-auto-update/releases/download/v1.0.6/RyooXIT-1.0.6.apk",
+  "sha256": "c47f2e6ff0badc8f2e5de2ae51618166d8432db1f7c4c844cf8c19e18739f3e3",
+  "changelog": "ADD RYOOXIT V.2.3 AND RYOOML EXTERNAL",
   "forceUpdate": false
 }
